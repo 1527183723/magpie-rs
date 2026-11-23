@@ -7,20 +7,38 @@ import android.os.Bundle;
 import android.view.ViewGroup;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
+import android.widget.ScrollView;
+import android.widget.TextView;
+
+import java.io.PrintWriter;
+import java.io.StringWriter;
 
 /**
  * The only Activity in the app.
  *
  * <p>It creates one {@link WebView}, hands it to Rust, and gets out of the way.
  * Every decision after that point — which URL loads, when it reloads, whether an
- * update is offered — is made in {@code libmagpie.so}. The Java here exists
- * because Android instantiates Activities itself; there is no JNI-free way to
- * declare one.
+ * update is offered — is made in {@code libmagpie.so}.
+ *
+ * <p>Start-up is wrapped in {@code try/catch} on purpose. A phone at the other
+ * end of this file has no adb attached, so a thrown exception that reaches the
+ * framework is indistinguishable from "the app is broken" with nothing to act
+ * on. Instead, whatever went wrong is rendered on screen: device, ABI, WebView
+ * version, and the stack trace.
  */
 public final class MainActivity extends Activity {
 
+    /** Set when the native library refuses to load; checked before anything else. */
+    private static volatile Throwable libError;
+
     static {
-        System.loadLibrary("magpie");
+        try {
+            System.loadLibrary("magpie");
+        } catch (Throwable t) {
+            // Not rethrown: an ExceptionInInitializerError here would take the
+            // Activity down before any UI exists.
+            libError = t;
+        }
     }
 
     private WebView web;
@@ -42,6 +60,18 @@ public final class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
+        if (libError != null) {
+            showFailure("native library did not load", libError);
+            return;
+        }
+        try {
+            buildUi();
+        } catch (Throwable t) {
+            showFailure("start-up failed", t);
+        }
+    }
+
+    private void buildUi() {
         web = new WebView(this);
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
@@ -74,8 +104,7 @@ public final class MainActivity extends Activity {
             }
             versionCode = Build.VERSION.SDK_INT >= 28 ? info.getLongVersionCode() : info.versionCode;
         } catch (Exception ignored) {
-            // A missing PackageInfo means the manager is still starting up; the
-            // defaults above are only used for the version banner.
+            // Only used for the version banner.
         }
 
         nativeStart(getFilesDir().getAbsolutePath(), versionName, versionCode, Build.VERSION.SDK_INT);
@@ -83,8 +112,69 @@ public final class MainActivity extends Activity {
 
         // The foreground service is what keeps the gateway alive once the screen
         // goes off; starting it here is also what the notification's "Open"
-        // action lands on.
-        MagpieService.start(this);
+        // action lands on. A refusal here must not take the page down with it.
+        try {
+            MagpieService.start(this);
+        } catch (Throwable t) {
+            android.util.Log.w("magpie", "could not start the foreground service", t);
+        }
+    }
+
+    /** Render whatever failed, with enough context to act on it. */
+    private void showFailure(String what, Throwable t) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("magpie ").append(versionNameOf()).append('\n');
+        sb.append("Android ").append(Build.VERSION.RELEASE)
+                .append(" (API ").append(Build.VERSION.SDK_INT).append(")\n");
+        sb.append("ABI: ").append(abi()).append('\n');
+        sb.append("WebView: ").append(webViewVersion()).append('\n');
+        sb.append("package: ").append(getPackageName()).append("\n\n");
+        sb.append(what).append("\n\n");
+
+        StringWriter sw = new StringWriter();
+        t.printStackTrace(new PrintWriter(sw));
+        sb.append(sw);
+
+        TextView tv = new TextView(this);
+        tv.setText(sb.toString());
+        tv.setTextSize(11);
+        tv.setTextIsSelectable(true);
+        tv.setPadding(32, 72, 32, 32);
+        tv.setBackgroundColor(0xFF0E1116);
+        tv.setTextColor(0xFFE6EDF3);
+
+        ScrollView sv = new ScrollView(this);
+        sv.setBackgroundColor(0xFF0E1116);
+        sv.addView(tv);
+        setContentView(sv);
+    }
+
+    private String versionNameOf() {
+        try {
+            PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+            return info.versionName == null ? "?" : info.versionName;
+        } catch (Exception e) {
+            return "?";
+        }
+    }
+
+    private static String abi() {
+        String[] abis = Build.SUPPORTED_ABIS;
+        return abis != null && abis.length > 0 ? abis[0] : "?";
+    }
+
+    private String webViewVersion() {
+        try {
+            PackageInfo info = getPackageManager().getPackageInfo("com.google.android.webview", 0);
+            return info.versionName == null ? "present" : info.versionName;
+        } catch (Exception e) {
+            try {
+                PackageInfo info = WebView.getCurrentWebViewPackage();
+                return info == null ? "unknown" : String.valueOf(info.versionName);
+            } catch (Throwable t) {
+                return "unavailable (" + e.getClass().getSimpleName() + ")";
+            }
+        }
     }
 
     @Override
@@ -118,10 +208,13 @@ public final class MainActivity extends Activity {
 
     /** Called by {@link ShellUi} when the user answers the update dialog. */
     void onUpdateChoice(int choice) {
-        nativeUpdateChoice(choice);
+        try {
+            nativeUpdateChoice(choice);
+        } catch (Throwable t) {
+            android.util.Log.w("magpie", "update choice failed", t);
+        }
     }
 
-    /** Used by the service notification and by ShellUi. */
     String statusJson() {
         return nativeStatus();
     }

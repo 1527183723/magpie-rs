@@ -20,12 +20,22 @@ use std::time::Duration;
 
 static UPDATE_BUSY: AtomicBool = AtomicBool::new(false);
 
-fn catch<T>(what: &str, f: impl FnOnce() -> T + std::panic::UnwindSafe, fallback: T) -> T {
-    match std::panic::catch_unwind(f) {
-        Ok(v) => v,
-        Err(_) => {
-            magpie_core::error!("{what} panicked");
-            fallback
+/// Run `f`, turning a panic into a logged error instead of an abort.
+///
+/// `AssertUnwindSafe` is deliberate: every closure here is a one-shot JNI entry
+/// point whose captured state (a `&mut JNIEnv`, a path) is not used again if it
+/// unwinds, so the usual objection to catching across a `&mut` does not apply.
+fn catch<T>(what: &str, f: impl FnOnce() -> T) -> Option<T> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(v) => Some(v),
+        Err(payload) => {
+            let detail = payload
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".to_string());
+            magpie_core::error!("{what} panicked: {detail}");
+            None
         }
     }
 }
@@ -44,10 +54,12 @@ fn port_open(port: u16) -> bool {
     .is_ok()
 }
 
-/// Wait for the portal to accept connections, then point the WebView at it.
+/// Wait for the page port to accept connections, then point the WebView at it.
 ///
-/// Loading before the page port is bound shows the platform's "webpage not
-/// available" screen, which looks like a crash to the user.
+/// Loading before the port is bound shows the platform's "webpage not
+/// available" screen; never loading leaves a black window that looks identical
+/// to a crash. If the port does not come up, the log tail is rendered instead so
+/// the failure is readable without adb.
 fn wait_and_load() {
     std::thread::spawn(move || {
         for _ in 0..150 {
@@ -58,8 +70,43 @@ fn wait_and_load() {
             std::thread::sleep(Duration::from_millis(100));
         }
         magpie_core::error!("the page port never opened");
-        webview::load_page();
+        webview::load_html(&failure_page());
     });
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// A readable "it did not start" page: what the shell knows, then the log.
+fn failure_page() -> String {
+    let lines = magpie_core::log::tail(60)
+        .iter()
+        .map(|l| html_escape(l))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let gateway_port = rt::gateway_port();
+    let web_port = rt::web_port();
+    format!(
+        r#"<!doctype html><meta name=viewport content="width=device-width,initial-scale=1">
+<style>
+ body{{font:14px ui-monospace,Menlo,monospace;background:#0e1116;color:#e6edf3;margin:0;padding:18px}}
+ h3{{color:#f85149;font:600 15px system-ui;margin:0 0 10px}}
+ dt{{color:#8b949e;font:12px system-ui;margin-top:8px}}
+ dd{{margin:2px 0 0;word-break:break-all}}
+ pre{{background:#05070a;border:1px solid #2a323d;border-radius:10px;padding:10px;
+      white-space:pre-wrap;font-size:11.5px;line-height:1.5;margin-top:14px}}
+</style>
+<h3>magpie 网关没有起来</h3>
+<dl>
+ <dt>网关端口</dt><dd>127.0.0.1:{gateway_port}</dd>
+ <dt>页面端口</dt><dd>127.0.0.1:{web_port}</dd>
+ <dt>说明</dt><dd>端口可能被占用，或启动过程中出错。下面是本次启动的日志。</dd>
+</dl>
+<pre>{lines}</pre>"#
+    )
 }
 
 fn start_gateway(files_dir: &str) {
@@ -86,28 +133,33 @@ pub extern "system" fn Java_io_magpie_rs_MainActivity_nativeStart(
     version_code: jlong,
     sdk: jint,
 ) {
-    let dir = jvm::jstring(&mut env, &files_dir);
-    let version = jvm::jstring(&mut env, &version_name);
-    let _ = webview::attach_activity(&mut env, &this);
-    shell::set_files_dir(std::path::PathBuf::from(&dir));
+    // Everything is inside `catch`: a panic in an `extern "system"` function
+    // cannot unwind, so without this a single bad line here aborts the process
+    // and the user just sees the launcher again.
+    catch("nativeStart", || {
+        let dir = jvm::jstring(&mut env, &files_dir);
+        let version = jvm::jstring(&mut env, &version_name);
+        let _ = webview::attach_activity(&mut env, &this);
+        shell::set_files_dir(std::path::PathBuf::from(&dir));
 
-    magpie_core::log::init(
-        Some(&std::path::Path::new(&dir).join("config").join("magpie.log")),
-        false,
-        magpie_core::log::Level::Info,
-    );
-    magpie_core::info!(
-        "magpie-rs {} (versionCode {}, API {}) starting",
-        env!("CARGO_PKG_VERSION"),
-        version_code,
-        sdk
-    );
-    let _ = version;
+        magpie_core::log::init(
+            Some(&std::path::Path::new(&dir).join("config").join("magpie.log")),
+            false,
+            magpie_core::log::Level::Info,
+        );
+        magpie_core::info!(
+            "magpie-rs {} (versionCode {}, API {}) starting; files={dir}",
+            env!("CARGO_PKG_VERSION"),
+            version_code,
+            sdk
+        );
+        let _ = version;
 
-    let dir2 = dir.clone();
-    std::thread::spawn(move || {
-        start_gateway(&dir2);
-        wait_and_load();
+        let dir2 = dir.clone();
+        std::thread::spawn(move || {
+            start_gateway(&dir2);
+            wait_and_load();
+        });
     });
 }
 
@@ -126,7 +178,7 @@ pub extern "system" fn Java_io_magpie_rs_MainActivity_nativeAttachWebView(
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_magpie_rs_MainActivity_nativeStop(_env: JNIEnv, _this: JObject) {
-    catch("nativeStop", rt::stop, ());
+    catch("nativeStop", rt::stop);
 }
 
 #[unsafe(no_mangle)]
@@ -181,11 +233,8 @@ pub extern "system" fn Java_io_magpie_rs_MainActivity_nativeCheckUpdate(
         return;
     }
     std::thread::spawn(move || {
-        let result = catch(
-            "update check",
-            update::latest,
-            Err(update::UpdateError::NoRelease),
-        );
+        let result = catch("update check", update::latest)
+            .unwrap_or_else(|| Err(update::UpdateError::NoRelease));
         UPDATE_BUSY.store(false, Ordering::SeqCst);
         match result {
             Ok(release) => {
@@ -223,7 +272,7 @@ pub extern "system" fn Java_io_magpie_rs_MainActivity_nativeUpdateChoice(
     match choice {
         1 => {
             std::thread::spawn(|| {
-                catch("update download", download_and_install, ());
+                catch("update download", download_and_install);
             });
         }
         3 => {
@@ -286,7 +335,7 @@ pub extern "system" fn Java_io_magpie_rs_MagpieService_nativeEnsureRunning(
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_magpie_rs_MagpieService_nativeStop(_env: JNIEnv, _this: JObject) {
-    catch("service stop", rt::stop, ());
+    catch("service stop", rt::stop);
 }
 
 #[unsafe(no_mangle)]

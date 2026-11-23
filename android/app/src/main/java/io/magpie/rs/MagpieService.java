@@ -8,21 +8,32 @@ import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.os.IBinder;
+import android.util.Log;
 
 /**
  * Keeps the gateway alive once the screen goes off.
  *
  * <p>The gateway itself runs inside this process — there is no child binary to
- * supervise any more, which is the one structural difference from the Go shell.
- * Android still needs a foreground service to promise the process will not be
- * frozen, so this class exists for the notification and nothing else.
+ * supervise. Android still needs a foreground service to promise the process
+ * will not be frozen, so this class exists for the notification and nothing
+ * else.
  */
 public final class MagpieService extends Service {
 
-    // The service can be started by BootReceiver without MainActivity ever
-    // having run, so its own class initialisation has to load the library.
+    private static final String TAG = "magpie";
+
+    /** Set when the native library refuses to load. */
+    private static volatile Throwable libError;
+
+    // BootReceiver can start this service without MainActivity ever having run,
+    // and a failure here would otherwise kill the process silently.
     static {
-        System.loadLibrary("magpie");
+        try {
+            System.loadLibrary("magpie");
+        } catch (Throwable t) {
+            libError = t;
+            Log.e(TAG, "cannot load libmagpie.so", t);
+        }
     }
 
     static final String ACTION_START = "io.magpie.rs.action.START";
@@ -49,7 +60,7 @@ public final class MagpieService extends Service {
         } catch (IllegalStateException e) {
             // Background start restricted: the process is going away anyway, and
             // the gateway dies with it.
-            android.util.Log.w("magpie", "stop action refused", e);
+            Log.w(TAG, "stop action refused", e);
         }
     }
 
@@ -63,13 +74,33 @@ public final class MagpieService extends Service {
     public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent == null ? ACTION_START : intent.getAction();
         if (ACTION_STOP.equals(action)) {
-            nativeStop();
+            if (libError == null) {
+                try {
+                    nativeStop();
+                } catch (Throwable t) {
+                    Log.w(TAG, "nativeStop failed", t);
+                }
+            }
             stopForeground(STOP_FOREGROUND_REMOVE);
             stopSelf();
             return START_NOT_STICKY;
         }
-        startForeground(NOTIFICATION_ID, notification(this));
-        nativeEnsureRunning(getFilesDir().getAbsolutePath());
+
+        try {
+            startForeground(NOTIFICATION_ID, notification(this));
+        } catch (Throwable t) {
+            // A refused foreground start is a platform decision, not a reason to
+            // crash the process that hosts the gateway.
+            Log.w(TAG, "startForeground refused", t);
+        }
+
+        if (libError == null) {
+            try {
+                nativeEnsureRunning(getFilesDir().getAbsolutePath());
+            } catch (Throwable t) {
+                Log.e(TAG, "gateway did not start", t);
+            }
+        }
         return START_STICKY;
     }
 

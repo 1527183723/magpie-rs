@@ -110,11 +110,16 @@ pub fn start(files_dir: &Path, lan: bool, gateway_port: u16, web_port: u16) -> R
     let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(());
     let gw = gateway.clone();
     runtime.spawn(async move {
-        let _ = gw
+        // A bind failure used to be swallowed here, which left the WebView
+        // pointing at a port nothing was listening on.
+        if let Err(e) = gw
             .run(async move {
                 let _ = stop_rx.changed().await;
             })
-            .await;
+            .await
+        {
+            magpie_core::error!("gateway stopped: {e}");
+        }
     });
 
     *slot().lock().unwrap_or_else(|e| e.into_inner()) = Some(Inner {

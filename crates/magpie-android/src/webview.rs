@@ -54,6 +54,34 @@ pub fn load_page() {
     magpie_core::info!("page: {url}");
 }
 
+/// Show a self-contained HTML document in the WebView.
+///
+/// Used to put a readable failure on screen when the page server never came up:
+/// a blank WebView is indistinguishable from a hang, and the phone usually has
+/// no adb attached to read the log from.
+pub fn load_html(html: &str) {
+    let doc = html.to_string();
+    with_view(move |env, view| {
+        let s = env.new_string(&doc)?;
+        let mime = env.new_string("text/html")?;
+        let encoding = env.new_string("utf-8")?;
+        let null = JObject::null();
+        env.call_method(
+            view.as_obj(),
+            "loadDataWithBaseURL",
+            "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+            &[
+                JValue::Object(&null),
+                JValue::Object(&s),
+                JValue::Object(&mime),
+                JValue::Object(&encoding),
+                JValue::Object(&null),
+            ],
+        )?;
+        Ok(())
+    });
+}
+
 /// Show a toast through the activity.
 pub fn toast(message: &str) {
     let Some(activity) = activity() else { return };
