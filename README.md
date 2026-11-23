@@ -389,18 +389,31 @@ MAGPIE_UPDATE_REPO=yourname/magpie-rs cargo build -p magpie-android --release --
 
 ## 状态
 
-已验证：
+真机实测（Xiaomi，Android 17 / API 37）：
 
-- **网关**：在 Windows 上以 `cargo run -p magpie-core -- serve` 跑通完整链路 —— 模型目录、OpenAI 入口、Anthropic→OpenAI 协议翻译（含 usage / finish_reason 转换）、显式 `provider/model` 路由、未知模型 404、`usage.jsonl` 账本
-- **单元测试**：`cargo test -p magpie-core` 的 9 个往返测试全过（协议互译、流式增量、SSE 分帧、data-URL 图片）
-- **质量门**：`cargo fmt --all -- --check` 与 `cargo clippy --workspace --all-targets -- -D warnings` 均无输出
-- **本机构建**：`scripts/build-apk.ps1 -Release` 编出 `app-release.apk`，6.40 MB，`zipalign -c -P 16` 通过（`.so` 的 PT_LOAD 与 zip 偏移都按 16 KB 对齐），V3 签名
-- **CI（Ubuntu 24.04）**：从零构建通过（装 NDK r30 → 交叉编译两个 ABI → 打包 → 签名）；打 `v1.0.0` tag 后自动挂到 [Release](https://github.com/1527183723/magpie-rs/releases/tag/v1.0.0)，产物 6.38 MB，**证书指纹与本机构建完全一致**（同一个 debug keystore），所以两个来源的包可以互相覆盖升级
-- **应用内更新的数据源**：`GET /repos/1527183723/magpie-rs/releases/latest` 返回 `v1.0.0` 与一个 `.apk` asset；`update.rs` 的 asset 选取规则与版本比较都用真实响应验证过
+| 版本 | 结果 |
+|---|---|
+| v1.0.0 / v1.0.1 | **启动即崩**：`RuntimeException: A WebView method was called on thread 'Thread-4'` → `WebView.java:2669 → loadUrl(WebView.java:747)` |
+| v1.0.2 | 修掉该崩溃，待验证 |
 
-未验证：
+已修：
 
-- **没有在真机或模拟器上安装运行过**（本机无 adb 设备）。首次真机验证按上面「安装与使用」的步骤走，出问题先看 **About → log file** 指向的那个文件
-- 更新流程里的 `PackageInstaller` 会话与更新对话框没有在设备上点过。这部分是标准平台 API，但「没跑过」就是没跑过
+- **WebView 跨线程调用**（致命）。Rust 的 `std::thread::spawn` 线程直接调 `WebView.loadUrl`，`checkThread` 抛异常、后台线程无人捕获、进程 abort。现在所有 WebView 操作都经 `io.magpie.rs.WebOps` 走 `Activity.runOnUiThread`；字节码已验证 `loadUrl`/`loadDataWithBaseURL` 的**唯一**调用点就在这个转发器的 lambda 里。
+- **重复启动页面加载器**。`nativeStart` 与 `nativeAttachWebView` 各 spawn 了一次，所以每次崩溃都是成对的两条 FATAL。现在用 `AtomicBool` 保证只启动一次。
+- **端口冲突**。默认 3425/3430 与本项目的前身 `com.magpie.android` 相同，两个都装时后者会先占住端口，导致 `Address already in use (os error 98)`。现在启动时探测 3425–3432 / 3430–3437，取第一个可绑的端口并写回 `shell.json`，通知栏与页面显示的都是实际端口。
+- **日志时间戳恒为 `[0.000]`**。v1.0.1 把毫秒硬编码成了 0，200 ms 的启动和 20 s 的看起来一样。现在是真实毫秒。
+- **`ApkInstaller` 在非 UI 线程弹 Toast**，会抛 `Can't create handler inside thread that has not called Looper.prepare()`。改走 `ShellUi.toast`。
 
-设计取舍写在 [docs/PLAN.md](docs/PLAN.md)，`jni` 版本的选择与升级路径写在 [docs/MIGRATING.md](docs/MIGRATING.md)。
+已验证（构建与网关侧）：
+
+- 网关在 Windows 上 `cargo run -p magpie-core -- serve` 跑通完整链路：模型目录、OpenAI 入口、Anthropic→OpenAI 协议翻译（含 usage / finish_reason）、显式 `provider/model` 路由、未知模型 404、`usage.jsonl` 账本
+- `cargo test -p magpie-core` 9 个往返测试全过；`cargo fmt --check` 与 `cargo clippy --workspace --all-targets -- -D warnings` 无输出
+- CI（Ubuntu）从零构建通过，打 tag 自动挂 Release；本地与 CI 的包证书指纹一致，可互相覆盖升级
+- 应用内更新的数据源：`releases/latest` 返回 `v1.0.0` + `.apk` asset，`update.rs` 的选取规则与版本比较都用真实响应验证过
+
+待验证：
+
+- v1.0.2 能否在真机上正常启动
+- `PackageInstaller` 更新流程与更新对话框尚未在设备上点过
+
+设计取舍见 [docs/PLAN.md](docs/PLAN.md)，`jni` 版本与升级路径见 [docs/MIGRATING.md](docs/MIGRATING.md)。

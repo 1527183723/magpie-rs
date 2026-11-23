@@ -19,6 +19,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 static UPDATE_BUSY: AtomicBool = AtomicBool::new(false);
+/// Guards against two entries both starting the page loader: `nativeStart` and
+/// `nativeAttachWebView` each used to spawn one, so every failure was reported
+/// twice and every load raced itself.
+static LOADER_STARTED: AtomicBool = AtomicBool::new(false);
 
 /// Run `f`, turning a panic into a logged error instead of an abort.
 ///
@@ -61,9 +65,12 @@ fn port_open(port: u16) -> bool {
 /// to a crash. If the port does not come up, the log tail is rendered instead so
 /// the failure is readable without adb.
 fn wait_and_load() {
+    if LOADER_STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
     std::thread::spawn(move || {
         for _ in 0..150 {
-            if rt::is_running() && port_open(rt::web_port()) {
+            if rt::is_running() && webview::has_view() && port_open(rt::web_port()) {
                 webview::load_page();
                 return;
             }
@@ -233,8 +240,8 @@ pub extern "system" fn Java_io_magpie_rs_MainActivity_nativeCheckUpdate(
         return;
     }
     std::thread::spawn(move || {
-        let result = catch("update check", update::latest)
-            .unwrap_or_else(|| Err(update::UpdateError::NoRelease));
+        let result =
+            catch("update check", update::latest).unwrap_or(Err(update::UpdateError::NoRelease));
         UPDATE_BUSY.store(false, Ordering::SeqCst);
         match result {
             Ok(release) => {

@@ -112,11 +112,16 @@ pub fn emit(level: Level, args: std::fmt::Arguments<'_>) {
     };
     // Uptime rather than wall-clock: Android's clock is fine, but a monotonic
     // stamp keeps the ordering honest when the device changes time zone.
-    let secs = EPOCH
-        .get_or_init(std::time::Instant::now)
-        .elapsed()
-        .as_secs();
-    let line = format!("[{:>6}.{:03}] {} {}", secs, 0, tag, args);
+    let elapsed = EPOCH.get_or_init(std::time::Instant::now).elapsed();
+    // The milliseconds are real: v1.0.1 printed a hard-coded `.000`, so a 200 ms
+    // start-up and a 20 s one produced indistinguishable stamps.
+    let line = format!(
+        "[{:>7}.{:03}] {} {}",
+        elapsed.as_secs(),
+        elapsed.subsec_millis(),
+        tag,
+        args
+    );
 
     let mut s = sink().lock().unwrap_or_else(|e| e.into_inner());
     if s.ring.len() == RING_CAPACITY {

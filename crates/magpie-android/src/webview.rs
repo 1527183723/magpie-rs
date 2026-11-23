@@ -2,8 +2,13 @@
 //!
 //! The `WebView` object itself is created by `MainActivity` — instantiating a
 //! platform view class is the one thing JNI makes genuinely painful — and handed
-//! here as a global reference. Everything afterwards (which URL it loads, what
-//! gets injected, when it reloads) is decided in Rust.
+//! here as a global reference.
+//!
+//! Every call is routed through `io.magpie.rs.WebOps`, which hops to the main
+//! Looper. Calling a `WebView` method directly from a Rust thread is not merely
+//! discouraged: `checkThread` throws a `RuntimeException` that nothing on that
+//! thread catches, and the process dies. That is exactly what happened in
+//! v1.0.0/v1.0.1 (`WebView.java:2669 → loadUrl(WebView.java:747)`).
 
 use jni::objects::{GlobalRef, JObject, JValue};
 use std::sync::Mutex;
@@ -31,77 +36,55 @@ pub fn activity() -> Option<GlobalRef> {
     ACTIVITY.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
-fn with_view(f: impl FnOnce(&mut jni::JNIEnv, &GlobalRef) -> Result<(), jni::errors::Error>) {
-    let view = WEBVIEW.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    let Some(view) = view else { return };
-    let _ = crate::jvm::with_env(|env| f(env, &view));
+pub fn has_view() -> bool {
+    WEBVIEW.lock().unwrap_or_else(|e| e.into_inner()).is_some()
 }
 
-/// Load the page. Called on start and whenever the gateway restarts on a new
-/// port.
-pub fn load_page() {
-    let url = page_url();
-    with_view(|env, view| {
-        let s = env.new_string(&url)?;
-        env.call_method(
-            view.as_obj(),
-            "loadUrl",
-            "(Ljava/lang/String;)V",
-            &[JValue::Object(&s)],
-        )?;
-        Ok(())
-    });
-    magpie_core::info!("page: {url}");
+fn view() -> Option<GlobalRef> {
+    WEBVIEW.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
-/// Show a self-contained HTML document in the WebView.
-///
-/// Used to put a readable failure on screen when the page server never came up:
-/// a blank WebView is indistinguishable from a hang, and the phone usually has
-/// no adb attached to read the log from.
-pub fn load_html(html: &str) {
-    let doc = html.to_string();
-    with_view(move |env, view| {
-        let s = env.new_string(&doc)?;
-        let mime = env.new_string("text/html")?;
-        let encoding = env.new_string("utf-8")?;
-        let null = JObject::null();
-        env.call_method(
-            view.as_obj(),
-            "loadDataWithBaseURL",
-            "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
-            &[
-                JValue::Object(&null),
-                JValue::Object(&s),
-                JValue::Object(&mime),
-                JValue::Object(&encoding),
-                JValue::Object(&null),
-            ],
-        )?;
-        Ok(())
-    });
-}
-
-/// Show a toast through the activity.
-pub fn toast(message: &str) {
-    let Some(activity) = activity() else { return };
-    let msg = message.to_string();
-    let _ = crate::jvm::with_env(|env| {
-        let s = env.new_string(&msg)?;
-        let toast = env.call_static_method(
-            "android/widget/Toast",
-            "makeText",
-            "(Landroid/content/Context;Ljava/lang/CharSequence;I)Landroid/widget/Toast;",
+/// Call `io.magpie.rs.WebOps.<method>(Activity, WebView, String)`.
+fn call(method: &str, arg: &str) -> Result<(), String> {
+    let (Some(activity), Some(view)) = (activity(), view()) else {
+        return Err("no activity or webview yet".into());
+    };
+    crate::jvm::with_env(|env| {
+        let s = env.new_string(arg)?;
+        env.call_static_method(
+            "io/magpie/rs/WebOps",
+            method,
+            "(Landroid/app/Activity;Landroid/webkit/WebView;Ljava/lang/String;)V",
             &[
                 JValue::Object(activity.as_obj()),
+                JValue::Object(view.as_obj()),
                 JValue::Object(&s),
-                JValue::Int(0),
             ],
         )?;
-        let obj = toast.l()?;
-        env.call_method(&obj, "show", "()V", &[])?;
         Ok(())
-    });
+    })
+}
+
+/// Load the page. Called once the page port answers.
+pub fn load_page() {
+    let url = page_url();
+    match call("loadUrl", &url) {
+        Ok(()) => magpie_core::info!("page: {url}"),
+        Err(e) => magpie_core::error!("cannot load the page: {e}"),
+    }
+}
+
+/// Render a self-contained document — used for the "it did not start" screen.
+pub fn load_html(html: &str) {
+    if let Err(e) = call("loadHtml", html) {
+        magpie_core::error!("cannot render the failure page: {e}");
+    }
+}
+
+pub fn toast(message: &str) {
+    if let Err(e) = call("toast", message) {
+        magpie_core::info!("(toast skipped: {e}) {message}");
+    }
 }
 
 pub fn page_url() -> String {

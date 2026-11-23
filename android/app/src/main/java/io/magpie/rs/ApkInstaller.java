@@ -4,7 +4,6 @@ import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageInstaller;
-import android.widget.Toast;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -28,7 +27,7 @@ public final class ApkInstaller {
     public static void install(Context ctx, String path) {
         File apk = new File(path);
         if (!apk.isFile() || apk.length() == 0) {
-            Toast.makeText(ctx, R.string.update_missing, Toast.LENGTH_LONG).show();
+            ShellUi.toast(ctx, ctx.getString(R.string.update_missing));
             return;
         }
         try {
@@ -58,8 +57,7 @@ public final class ApkInstaller {
                 session.commit(pending.getIntentSender());
             }
         } catch (Exception e) {
-            Toast.makeText(ctx, ctx.getString(R.string.update_failed, String.valueOf(e.getMessage())),
-                    Toast.LENGTH_LONG).show();
+            ShellUi.toast(ctx, ctx.getString(R.string.update_failed, String.valueOf(e.getMessage())));
         }
     }
 }

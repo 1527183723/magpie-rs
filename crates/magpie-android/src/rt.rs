@@ -6,6 +6,7 @@
 //! the stop signal that both the notification's "Stop" action and the Activity's
 //! `onDestroy` send.
 
+use crate::shell;
 use magpie_core::gateway::{Gateway, GatewayOptions};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
@@ -25,6 +26,16 @@ static WEB_KEY: OnceLock<String> = OnceLock::new();
 
 fn slot() -> &'static Mutex<Option<Inner>> {
     INNER.get_or_init(|| Mutex::new(None))
+}
+
+/// First port at or after `preferred` that can be bound on `host`.
+fn pick_port(host: &str, preferred: u16) -> u16 {
+    for candidate in preferred..preferred.saturating_add(8) {
+        if std::net::TcpListener::bind((host, candidate)).is_ok() {
+            return candidate;
+        }
+    }
+    preferred
 }
 
 pub fn is_running() -> bool {
@@ -61,11 +72,28 @@ pub fn start(files_dir: &Path, lan: bool, gateway_port: u16, web_port: u16) -> R
     std::fs::create_dir_all(&config_dir)
         .map_err(|e| format!("cannot create {config_dir:?}: {e}"))?;
 
-    let addr = if lan {
-        format!("0.0.0.0:{gateway_port}")
-    } else {
-        format!("127.0.0.1:{gateway_port}")
-    };
+    // Another magpie build (the Go one ships the same 3425/3430 defaults) may
+    // already hold these ports. Binding is the only honest test, and the window
+    // between this probe and the real bind is not worth a retry loop.
+    let host = if lan { "0.0.0.0" } else { "127.0.0.1" };
+    let gateway_port = pick_port(host, gateway_port);
+    let web_port = pick_port("127.0.0.1", web_port);
+    let addr = format!("{host}:{gateway_port}");
+
+    // Remember where we actually landed so the notification and the page agree.
+    let mut settings = shell::load(files_dir);
+    if settings.gateway_port != gateway_port || settings.web_port != web_port {
+        magpie_core::warn!(
+            "port {}:{} was taken; using gateway {} and page {}",
+            settings.gateway_port,
+            settings.web_port,
+            gateway_port,
+            web_port
+        );
+        settings.gateway_port = gateway_port;
+        settings.web_port = web_port;
+        let _ = shell::save(files_dir, &settings);
+    }
 
     let opts = GatewayOptions {
         config_dir: config_dir.clone(),
