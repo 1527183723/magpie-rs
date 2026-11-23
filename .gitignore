@@ -4,6 +4,9 @@ target/
 *.aab
 *.keystore
 *.jks
+# ...except the well-known Android debug key, which has to stay stable across CI
+# builds or update-installs fail with a signature mismatch.
+!android/debug.keystore
 
 # Android build intermediates
 android/build/
