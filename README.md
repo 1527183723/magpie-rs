@@ -389,7 +389,18 @@ MAGPIE_UPDATE_REPO=yourname/magpie-rs cargo build -p magpie-android --release --
 
 ## 状态
 
-- 网关：在 Windows 上以 `cargo run -p magpie-core -- serve` 跑过完整流程（模型目录、OpenAI 入口、Anthropic→OpenAI 翻译、显式 `provider/model`、未知模型 404、用量账本）
-- APK：scripts/build-apk.ps1 -Release 在本机编出 arm64-v8a 与 x86_64 的 pp-release.apk，**6.40 MB**，zipalign -c -P 16 通过（.so 的 PT_LOAD 与 zip 偏移都是 16 KB 对齐），V3 签名，debug key
-- 网关进程内运行的取舍、16 KB 页对齐的两处、以及 jni 版本的选择，都写在 [docs/PLAN.md](docs/PLAN.md) 和 [docs/MIGRATING.md](docs/MIGRATING.md)
-- **未在真机或模拟器上安装运行过**（本机没有 adb 设备）。首次真机验证请按上面「安装与使用」的步骤走，出问题先看 **About → log file** 指向的那个文件
+已验证：
+
+- **网关**：在 Windows 上以 `cargo run -p magpie-core -- serve` 跑通完整链路 —— 模型目录、OpenAI 入口、Anthropic→OpenAI 协议翻译（含 usage / finish_reason 转换）、显式 `provider/model` 路由、未知模型 404、`usage.jsonl` 账本
+- **单元测试**：`cargo test -p magpie-core` 的 9 个往返测试全过（协议互译、流式增量、SSE 分帧、data-URL 图片）
+- **质量门**：`cargo fmt --all -- --check` 与 `cargo clippy --workspace --all-targets -- -D warnings` 均无输出
+- **本机构建**：`scripts/build-apk.ps1 -Release` 编出 `app-release.apk`，6.40 MB，`zipalign -c -P 16` 通过（`.so` 的 PT_LOAD 与 zip 偏移都按 16 KB 对齐），V3 签名
+- **CI（Ubuntu 24.04）**：从零构建通过（装 NDK r30 → 交叉编译两个 ABI → 打包 → 签名）；打 `v1.0.0` tag 后自动挂到 [Release](https://github.com/1527183723/magpie-rs/releases/tag/v1.0.0)，产物 6.38 MB，**证书指纹与本机构建完全一致**（同一个 debug keystore），所以两个来源的包可以互相覆盖升级
+- **应用内更新的数据源**：`GET /repos/1527183723/magpie-rs/releases/latest` 返回 `v1.0.0` 与一个 `.apk` asset；`update.rs` 的 asset 选取规则与版本比较都用真实响应验证过
+
+未验证：
+
+- **没有在真机或模拟器上安装运行过**（本机无 adb 设备）。首次真机验证按上面「安装与使用」的步骤走，出问题先看 **About → log file** 指向的那个文件
+- 更新流程里的 `PackageInstaller` 会话与更新对话框没有在设备上点过。这部分是标准平台 API，但「没跑过」就是没跑过
+
+设计取舍写在 [docs/PLAN.md](docs/PLAN.md)，`jni` 版本的选择与升级路径写在 [docs/MIGRATING.md](docs/MIGRATING.md)。
