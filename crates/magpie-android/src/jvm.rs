@@ -17,10 +17,14 @@ pub fn vm() -> Option<&'static JavaVM> {
     VM.get()
 }
 
-/// Run `f` with an attached `JNIEnv` on the current thread.
+/// Run `f` with an attached `JNIEnv` on the current thread, and make sure no JNI
+/// exception is left pending when it returns.
 ///
-/// Attaching per call is cheap on Android after the first time, and it keeps the
-/// shell free of a thread-attach/ detach dance around every callback.
+/// That last part is not politeness. A pending exception thrown by a `FindClass`
+/// or a `CallVoidMethod` on a natively attached thread has no Java frame to
+/// unwind into, so it reaches ART and aborts the process. v1.0.2 died exactly
+/// that way: `ClassNotFoundException: io.magpie.rs.WebOps`, no Java stack, no
+/// chance to log anything.
 pub fn with_env<R>(
     f: impl FnOnce(&mut jni::JNIEnv) -> Result<R, jni::errors::Error>,
 ) -> Result<R, String> {
@@ -28,7 +32,17 @@ pub fn with_env<R>(
     let mut guard = vm
         .attach_current_thread()
         .map_err(|e| format!("attach: {e}"))?;
-    f(&mut guard).map_err(|e| format!("jni: {e}"))
+
+    let out = f(&mut guard);
+
+    // `exception_describe` writes the pending exception to logcat before it is
+    // dropped, which is the only record of it that survives.
+    if let Ok(true) = guard.exception_check() {
+        let _ = guard.exception_describe();
+        let _ = guard.exception_clear();
+    }
+
+    out.map_err(|e| format!("jni: {e}"))
 }
 
 /// Translate a Java `String` into a Rust `String`, tolerating null.

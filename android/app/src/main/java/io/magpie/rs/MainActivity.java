@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.content.pm.PackageInfo;
 import android.os.Build;
 import android.os.Bundle;
+import android.util.Log;
 import android.view.ViewGroup;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
@@ -27,6 +28,8 @@ import java.io.StringWriter;
  * version, and the stack trace.
  */
 public final class MainActivity extends Activity {
+
+    private static final String TAG = "magpie";
 
     /** Set when the native library refuses to load; checked before anything else. */
     private static volatile Throwable libError;
@@ -206,6 +209,58 @@ public final class MainActivity extends Activity {
         super.onDestroy();
     }
 
+    // ---- entry points for Rust (called from any thread) -------------------
+
+    /** Rust: show the page. {@code loadUrl} must run on the main Looper. */
+    public void magpieLoadUrl(String url) {
+        final WebView w = web;
+        if (w == null) {
+            Log.w(TAG, "magpieLoadUrl before the WebView existed");
+            return;
+        }
+        runOnUiThread(() -> {
+            try {
+                w.loadUrl(url);
+            } catch (Throwable t) {
+                Log.w(TAG, "loadUrl failed", t);
+            }
+        });
+    }
+
+    /** Rust: render a self-contained failure page. */
+    public void magpieLoadHtml(String html) {
+        final WebView w = web;
+        if (w == null) {
+            Log.w(TAG, "magpieLoadHtml before the WebView existed");
+            return;
+        }
+        runOnUiThread(() -> {
+            try {
+                w.loadDataWithBaseURL(null, html, "text/html", "utf-8", null);
+            } catch (Throwable t) {
+                Log.w(TAG, "loadDataWithBaseURL failed", t);
+            }
+        });
+    }
+
+    public void magpieToast(String message) {
+        runOnUiThread(() -> ShellUi.toast(this, message));
+    }
+
+    public void magpieShowUpdate(String version, String size, String notes) {
+        runOnUiThread(() -> ShellUi.showUpdate(this, version, size, notes));
+    }
+
+    public void magpieUpdateProgress(int percent) {
+        runOnUiThread(() -> ShellUi.updateProgress(this, percent));
+    }
+
+    /** Copying an APK is disk I/O: keep it off the main thread. */
+    public void magpieInstall(String path) {
+        Thread worker = new Thread(() -> ApkInstaller.install(this, path), "magpie-install");
+        worker.setDaemon(true);
+        worker.start();
+    }
     /** Called by {@link ShellUi} when the user answers the update dialog. */
     void onUpdateChoice(int choice) {
         try {

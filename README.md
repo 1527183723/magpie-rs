@@ -389,31 +389,38 @@ MAGPIE_UPDATE_REPO=yourname/magpie-rs cargo build -p magpie-android --release --
 
 ## 状态
 
-真机实测（Xiaomi，Android 17 / API 37）：
+真机实测（Xiaomi，Android 17 / API 37，WebView 157）：
 
-| 版本 | 结果 |
-|---|---|
-| v1.0.0 / v1.0.1 | **启动即崩**：`RuntimeException: A WebView method was called on thread 'Thread-4'` → `WebView.java:2669 → loadUrl(WebView.java:747)` |
-| v1.0.2 | 修掉该崩溃，待验证 |
+| 版本 | 结果 | 崩溃点 |
+|---|---|---|
+| v1.0.0 / v1.0.1 | 启动即崩，20 次进程无一存活超过 320 ms | `RuntimeException: A WebView method was called on thread 'Thread-4'` → `WebView.java:2669 → loadUrl(WebView.java:747)` |
+| v1.0.2 | 启动即崩，3 次 | `ClassNotFoundException: io.magpie.rs.WebOps`（无 Java 栈） |
+| v1.0.3 | 待验证 | — |
 
-已修：
+### 两代崩溃与修法
 
-- **WebView 跨线程调用**（致命）。Rust 的 `std::thread::spawn` 线程直接调 `WebView.loadUrl`，`checkThread` 抛异常、后台线程无人捕获、进程 abort。现在所有 WebView 操作都经 `io.magpie.rs.WebOps` 走 `Activity.runOnUiThread`；字节码已验证 `loadUrl`/`loadDataWithBaseURL` 的**唯一**调用点就在这个转发器的 lambda 里。
-- **重复启动页面加载器**。`nativeStart` 与 `nativeAttachWebView` 各 spawn 了一次，所以每次崩溃都是成对的两条 FATAL。现在用 `AtomicBool` 保证只启动一次。
-- **端口冲突**。默认 3425/3430 与本项目的前身 `com.magpie.android` 相同，两个都装时后者会先占住端口，导致 `Address already in use (os error 98)`。现在启动时探测 3425–3432 / 3430–3437，取第一个可绑的端口并写回 `shell.json`，通知栏与页面显示的都是实际端口。
-- **日志时间戳恒为 `[0.000]`**。v1.0.1 把毫秒硬编码成了 0，200 ms 的启动和 20 s 的看起来一样。现在是真实毫秒。
-- **`ApkInstaller` 在非 UI 线程弹 Toast**，会抛 `Can't create handler inside thread that has not called Looper.prepare()`。改走 `ShellUi.toast`。
+**A. WebView 跨线程。** Rust 在 `std::thread::spawn` 的线程里直接调 `WebView.loadUrl`。WebView 要求所有方法在它的 Looper（主线程）上执行，`checkThread` 抛的异常在那个线程无人捕获 → abort。现在 Java 侧 `magpieLoadUrl` / `magpieLoadHtml` 内部 `runOnUiThread`，Rust 只投递。
 
-已验证（构建与网关侧）：
+**B. native 线程找不到应用类。** v1.0.2 让 Rust 用 `call_static_method("io/magpie/rs/WebOps", …)`，而 `FindClass` 在**由 native attach 的线程**上没有 Java 帧，会回退到 SystemClassLoader——它能看见 `android.webkit.WebView`，看不见 APK 里的 `io.magpie.rs.*`。同一个线程、同一套调用方式，framework 类通过、应用类失败，这就是类加载器上下文的铁证。
 
-- 网关在 Windows 上 `cargo run -p magpie-core -- serve` 跑通完整链路：模型目录、OpenAI 入口、Anthropic→OpenAI 协议翻译（含 usage / finish_reason）、显式 `provider/model` 路由、未知模型 404、`usage.jsonl` 账本
+两处叠加才致命：`FindClass` 失败后 JNI 异常**挂起**，没人 clear，它直接逃逸回 ART → FATAL。
+
+修法：
+
+- 所有 Java 交互改为**在已持有的 Activity 对象上调实例方法**（`CallObjectMethod` 走 `GetObjectClass(obj)`，不需要任何类查找）。`.so` 里现在不含 `io/magpie/rs/` 开头的字符串——已用 `llvm-strings` 核对
+- `jvm::with_env` 在返回前统一 `exception_describe` + `exception_clear`，任何 JNI 异常都只变成一条日志
+- 顺带修掉：加载线程重复启动（`AtomicBool`）、端口 3425/3430 被占时自动顺延并写回 `shell.json`、日志时间戳硬编码 `.000`、`ApkInstaller` 在 Rust 线程弹 Toast
+
+### 已验证
+
+- 网关在 Windows 上 `cargo run -p magpie-core -- serve` 跑通：模型目录、OpenAI 入口、Anthropic→OpenAI 协议翻译（含 usage / finish_reason）、显式 `provider/model` 路由、未知模型 404、`usage.jsonl`
 - `cargo test -p magpie-core` 9 个往返测试全过；`cargo fmt --check` 与 `cargo clippy --workspace --all-targets -- -D warnings` 无输出
 - CI（Ubuntu）从零构建通过，打 tag 自动挂 Release；本地与 CI 的包证书指纹一致，可互相覆盖升级
-- 应用内更新的数据源：`releases/latest` 返回 `v1.0.0` + `.apk` asset，`update.rs` 的选取规则与版本比较都用真实响应验证过
+- 应用内更新的数据源：`releases/latest` 返回 `v1.0.0` + `.apk` asset，`update.rs` 的选取规则与版本比较用真实响应验证过
 
-待验证：
+### 待验证
 
-- v1.0.2 能否在真机上正常启动
+- v1.0.3 能否在真机上正常启动
 - `PackageInstaller` 更新流程与更新对话框尚未在设备上点过
 
 设计取舍见 [docs/PLAN.md](docs/PLAN.md)，`jni` 版本与升级路径见 [docs/MIGRATING.md](docs/MIGRATING.md)。

@@ -1,14 +1,21 @@
-//! Operating the page's `WebView` from Rust.
+//! Operating the page from Rust.
 //!
-//! The `WebView` object itself is created by `MainActivity` — instantiating a
-//! platform view class is the one thing JNI makes genuinely painful — and handed
-//! here as a global reference.
+//! Two rules govern this file, both learned from crashes on a real device:
 //!
-//! Every call is routed through `io.magpie.rs.WebOps`, which hops to the main
-//! Looper. Calling a `WebView` method directly from a Rust thread is not merely
-//! discouraged: `checkThread` throws a `RuntimeException` that nothing on that
-//! thread catches, and the process dies. That is exactly what happened in
-//! v1.0.0/v1.0.1 (`WebView.java:2669 → loadUrl(WebView.java:747)`).
+//! 1. **Never `FindClass` an app class from a natively attached thread.** Such a
+//!    thread has no Java frame, so `FindClass` falls back to the system class
+//!    loader, which can see `android.webkit.WebView` but *not*
+//!    `io.magpie.rs.Anything`. v1.0.2 died on exactly that:
+//!    `ClassNotFoundException: io.magpie.rs.WebOps`.
+//!
+//!    The fix is to hold the `Activity` (already a `GlobalRef`) and call an
+//!    *instance* method on it. `CallObjectMethod` resolves the method through
+//!    `GetObjectClass(obj)`, which needs no class lookup at all.
+//!
+//! 2. **Never leave a JNI exception pending.** The Java side does the thread hop
+//!    (`runOnUiThread`); if anything throws there it is caught in Java. If the
+//!    JNI call itself fails, `jvm::with_env` clears the exception before it can
+//!    reach ART.
 
 use jni::objects::{GlobalRef, JObject, JValue};
 use std::sync::Mutex;
@@ -40,26 +47,17 @@ pub fn has_view() -> bool {
     WEBVIEW.lock().unwrap_or_else(|e| e.into_inner()).is_some()
 }
 
-fn view() -> Option<GlobalRef> {
-    WEBVIEW.lock().unwrap_or_else(|e| e.into_inner()).clone()
-}
-
-/// Call `io.magpie.rs.WebOps.<method>(Activity, WebView, String)`.
-fn call(method: &str, arg: &str) -> Result<(), String> {
-    let (Some(activity), Some(view)) = (activity(), view()) else {
-        return Err("no activity or webview yet".into());
-    };
+/// Call `MainActivity.magpie<Name>(String)` — resolved on the object, not looked
+/// up by name in a class loader.
+fn call_string(method: &str, arg: &str) -> Result<(), String> {
+    let activity = activity().ok_or("the activity is not attached yet")?;
     crate::jvm::with_env(|env| {
         let s = env.new_string(arg)?;
-        env.call_static_method(
-            "io/magpie/rs/WebOps",
+        env.call_method(
+            activity.as_obj(),
             method,
-            "(Landroid/app/Activity;Landroid/webkit/WebView;Ljava/lang/String;)V",
-            &[
-                JValue::Object(activity.as_obj()),
-                JValue::Object(view.as_obj()),
-                JValue::Object(&s),
-            ],
+            "(Ljava/lang/String;)V",
+            &[JValue::Object(&s)],
         )?;
         Ok(())
     })
@@ -68,7 +66,7 @@ fn call(method: &str, arg: &str) -> Result<(), String> {
 /// Load the page. Called once the page port answers.
 pub fn load_page() {
     let url = page_url();
-    match call("loadUrl", &url) {
+    match call_string("magpieLoadUrl", &url) {
         Ok(()) => magpie_core::info!("page: {url}"),
         Err(e) => magpie_core::error!("cannot load the page: {e}"),
     }
@@ -76,13 +74,13 @@ pub fn load_page() {
 
 /// Render a self-contained document — used for the "it did not start" screen.
 pub fn load_html(html: &str) {
-    if let Err(e) = call("loadHtml", html) {
+    if let Err(e) = call_string("magpieLoadHtml", html) {
         magpie_core::error!("cannot render the failure page: {e}");
     }
 }
 
 pub fn toast(message: &str) {
-    if let Err(e) = call("toast", message) {
+    if let Err(e) = call_string("magpieToast", message) {
         magpie_core::info!("(toast skipped: {e}) {message}");
     }
 }

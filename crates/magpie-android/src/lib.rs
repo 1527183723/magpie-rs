@@ -354,22 +354,38 @@ pub extern "system" fn Java_io_magpie_rs_MagpieService_nativeRunning(
 }
 
 // ------------------------------------------------- java-side UI, called by us
+//
+// All of these call an *instance* method on the Activity, never
+// `CallStaticVoidMethod` with a class name. A natively attached thread has no
+// Java frame, so `FindClass("io/magpie/rs/ShellUi")` resolves through the system
+// class loader and fails — the class is in the APK but invisible from here.
+// `GetObjectClass(activity)` has no such problem.
 
-/// `io.magpie.rs.ShellUi.showUpdate(Activity, version, size, notes)`.
+fn with_activity<R>(
+    f: impl FnOnce(&mut jni::JNIEnv, &jni::objects::GlobalRef) -> Result<R, jni::errors::Error>,
+) -> Option<R> {
+    let activity = webview::activity()?;
+    match jvm::with_env(|env| f(env, &activity)) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            magpie_core::error!("call into MainActivity failed: {e}");
+            None
+        }
+    }
+}
+
+/// `MainActivity.magpieShowUpdate(version, size, notes)`.
 fn show_update_dialog(release: &update::Release) {
-    let _ = jvm::with_env(|env| {
-        let Some(activity) = webview::activity() else {
-            return Ok(());
-        };
+    let notes = first_lines(&release.notes, 12);
+    with_activity(|env, activity| {
         let version = env.new_string(&release.tag)?;
         let size = env.new_string(update::size_text(release))?;
-        let notes = env.new_string(first_lines(&release.notes, 12))?;
-        env.call_static_method(
-            "io/magpie/rs/ShellUi",
-            "showUpdate",
-            "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+        let notes = env.new_string(&notes)?;
+        env.call_method(
+            activity.as_obj(),
+            "magpieShowUpdate",
+            "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
             &[
-                jni::objects::JValue::Object(activity.as_obj()),
                 jni::objects::JValue::Object(&version),
                 jni::objects::JValue::Object(&size),
                 jni::objects::JValue::Object(&notes),
@@ -380,18 +396,12 @@ fn show_update_dialog(release: &update::Release) {
 }
 
 fn update_progress(pct: u8) {
-    let _ = jvm::with_env(|env| {
-        let Some(activity) = webview::activity() else {
-            return Ok(());
-        };
-        env.call_static_method(
-            "io/magpie/rs/ShellUi",
-            "updateProgress",
-            "(Landroid/content/Context;I)V",
-            &[
-                jni::objects::JValue::Object(activity.as_obj()),
-                jni::objects::JValue::Int(pct as jint),
-            ],
+    with_activity(|env, activity| {
+        env.call_method(
+            activity.as_obj(),
+            "magpieUpdateProgress",
+            "(I)V",
+            &[jni::objects::JValue::Int(pct as jint)],
         )?;
         Ok(())
     });
@@ -399,19 +409,13 @@ fn update_progress(pct: u8) {
 
 fn install_apk(path: &std::path::Path) {
     let p = path.display().to_string();
-    let _ = jvm::with_env(|env| {
-        let Some(activity) = webview::activity() else {
-            return Ok(());
-        };
+    with_activity(|env, activity| {
         let s = env.new_string(&p)?;
-        env.call_static_method(
-            "io/magpie/rs/ApkInstaller",
-            "install",
-            "(Landroid/content/Context;Ljava/lang/String;)V",
-            &[
-                jni::objects::JValue::Object(activity.as_obj()),
-                jni::objects::JValue::Object(&s),
-            ],
+        env.call_method(
+            activity.as_obj(),
+            "magpieInstall",
+            "(Ljava/lang/String;)V",
+            &[jni::objects::JValue::Object(&s)],
         )?;
         Ok(())
     });
