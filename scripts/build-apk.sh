@@ -122,9 +122,12 @@ step "5/7 d8"
 # ---------------------------------------------------------------------- 6/7 zip
 step "6/7 package dex + native libraries"
 (cd "$BUILD/dex" && zip -q "$BUILD/base.apk" classes.dex)
-# zip stores the paths as given, so stage them under lib/ exactly as Android
-# expects: lib/<abi>/lib<name>.so
-(cd "$LIBROOT/.." && find lib -name '*.so' -print0 | zip -q -0 "$BUILD/base.apk" -@)
+# zip stores the paths as given, so the archive is built from a directory that
+# already has the lib/<abi>/ layout. `-exec ... {} +` is used instead of
+# `stdin + -@`: zip's stdin mode splits on newlines, so `-print0` silently
+# truncated the list to one entry and only the first ABI made it into the APK.
+(cd "$LIBROOT/.." && find lib -name '*.so' -exec zip -q -0 "$BUILD/base.apk" {} +)
+(cd "$LIBROOT/.." && unzip -l "$BUILD/base.apk" | grep -c 'lib/.*\.so' | xargs -I{} echo "  {} native librar(y|ies) packaged")
 
 # ---------------------------------------------------------- 7/7 align and sign
 step "7/7 zipalign + apksigner"
