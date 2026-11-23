@@ -56,7 +56,7 @@ jobs:
       - name: Install Android NDK
         id: ndk
         run: |
-          NDK_VERSION=29.0.14206865
+          NDK_VERSION=30.0.16248370
           echo "Installing NDK r${NDK_VERSION}"
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;${NDK_VERSION}" "platforms;android-36" "build-tools;36.0.0"
@@ -67,8 +67,13 @@ jobs:
           NDK_HOME: ${{ steps.ndk.outputs.NDK_HOME }}
         run: |
           NDKBIN="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          export CARGO_TARGET_$(echo "${{ matrix.target }}" | tr 'a-z-' 'A-Z_')_LINKER="$NDKBIN/${{ matrix.target }}36-clang"
-          export CC_$(echo "${{ matrix.target }}" | tr '-' '_')="$NDKBIN/${{ matrix.target }}36-clang"
+          # The clang wrappers are named <triple><api>-clang; an older NDK tops
+          # out below our target API and only ships the unversioned wrapper.
+          CLANG="$NDKBIN/${{ matrix.target }}36-clang"
+          [ -x "$CLANG" ] || CLANG="$NDKBIN/${{ matrix.target }}-clang"
+          echo "using $CLANG"
+          export CARGO_TARGET_$(echo "${{ matrix.target }}" | tr 'a-z-' 'A-Z_')_LINKER="$CLANG"
+          export CC_$(echo "${{ matrix.target }}" | tr '-' '_')="$CLANG"
           export AR_$(echo "${{ matrix.target }}" | tr '-' '_')="$NDKBIN/llvm-ar"
           cargo build -p magpie-android --release --target "${{ matrix.target }}"
 
@@ -76,7 +81,7 @@ jobs:
         run: |
           mkdir -p out/lib/${{ matrix.abi }}
           cp "target/${{ matrix.target }}/release/libmagpie.so" "out/lib/${{ matrix.abi }}/libmagpie.so"
-          "$ANDROID_HOME/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" --strip-unneeded "out/${{ matrix.abi }}/libmagpie.so" 2>/dev/null || true
+          "${{ steps.ndk.outputs.NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" --strip-unneeded "out/${{ matrix.abi }}/libmagpie.so" 2>/dev/null || true
           ls -la "out/lib/${{ matrix.abi }}"
 
       - uses: actions/upload-artifact@v4

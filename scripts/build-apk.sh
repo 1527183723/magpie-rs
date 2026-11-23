@@ -61,8 +61,10 @@ if [[ $SKIP_RUST -eq 0 ]]; then
   for abi in "${ABIS[@]}"; do
     t="${TARGET[$abi]}"
     upper="$(echo "$t" | tr 'a-z-' 'A-Z_')"
-    export "CARGO_TARGET_${upper}_LINKER=$NDKBIN/${t}${API}-clang"
-    export "CC_$(echo "$t" | tr '-' '_')=$NDKBIN/${t}${API}-clang"
+    CLANG="$NDKBIN/${t}${API}-clang"
+    [[ -x "$CLANG" ]] || CLANG="$NDKBIN/${t}-clang"
+    export "CARGO_TARGET_${upper}_LINKER=$CLANG"
+    export "CC_$(echo "$t" | tr '-' '_')=$CLANG"
     export "AR_$(echo "$t" | tr '-' '_')=$NDKBIN/llvm-ar"
     cargo build -p magpie-android --target "$t" $([[ $PROFILE == release ]] && echo --release)
   done
