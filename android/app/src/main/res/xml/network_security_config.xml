@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!--
+      The gateway and its page are plain http on loopback: the page carries the
+      key in its URL, and nothing ever leaves the device. Everything else stays
+      on the default "no cleartext" policy, which is also what the agent-facing
+      providers want (they are https).
+
+      Rust's own TLS stack is not governed by this file — it has its own root
+      store — so this only covers the WebView.
+    -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

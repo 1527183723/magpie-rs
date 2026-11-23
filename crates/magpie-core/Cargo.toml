@@ -1,0 +1,27 @@
+[package]
+name = "magpie-core"
+description = "Every agent's model. One place. A Rust reimplementation of the magpie gateway."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+reqwest = { workspace = true }
+rustls = { workspace = true }
+futures-util = { workspace = true }
+bytes = { workspace = true }
+http = { workspace = true }
+
+[lib]
+name = "magpie_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "magpie"
+path = "src/main.rs"

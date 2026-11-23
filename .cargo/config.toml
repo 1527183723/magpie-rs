@@ -1,0 +1,16 @@
+# Linkers come from the environment so the checkout stays portable:
+#   CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=<ndk>/toolchains/llvm/prebuilt/<host>/bin/aarch64-linux-android<API>-clang[.cmd]
+# scripts/build-apk.ps1 and scripts/build-apk.sh set those before invoking cargo.
+#
+# 16 KB page alignment: every Android 15+ device may run a 16 KB kernel page
+# size, and the loader refuses a .so whose PT_LOAD segments are only 4 KB
+# aligned. NDK r28+ already defaults to this; we set it explicitly so a plain
+# `cargo build` with any wrapper still produces a loadable library.
+[target.aarch64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
+
+[target.x86_64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
+
+[net]
+git-fetch-with-cli = true

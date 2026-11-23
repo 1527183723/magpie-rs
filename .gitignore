@@ -1,0 +1,25 @@
+# Build artefacts
+target/
+*.apk
+*.aab
+*.keystore
+*.jks
+
+# Android build intermediates
+android/build/
+android/app/build/
+android/.gradle/
+
+# Local signing material — never commit these
+keystore.properties
+release.keystore
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Local toolchain sandbox (only present on the machine that built the APK)
+.toolchain/

@@ -1,0 +1,172 @@
+name: release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Fail fast on formatting and lints: a broken build should not be discovered
+  # after the NDK has downloaded.
+  check:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy -p magpie-core --all-targets -- -D warnings
+
+  build:
+    name: apk (${{ matrix.abi }})
+    runs-on: ubuntu-latest
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - abi: arm64-v8a
+            target: aarch64-linux-android
+          - abi: x86_64
+            target: x86_64-linux-android
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install Android NDK
+        id: ndk
+        run: |
+          NDK_VERSION=29.0.14206865
+          echo "Installing NDK r${NDK_VERSION}"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;${NDK_VERSION}" "platforms;android-36" "build-tools;36.0.0"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/${NDK_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Build native library
+        env:
+          NDK_HOME: ${{ steps.ndk.outputs.NDK_HOME }}
+        run: |
+          NDKBIN="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CARGO_TARGET_$(echo "${{ matrix.target }}" | tr 'a-z-' 'A-Z_')_LINKER="$NDKBIN/${{ matrix.target }}36-clang"
+          export CC_$(echo "${{ matrix.target }}" | tr '-' '_')="$NDKBIN/${{ matrix.target }}36-clang"
+          export AR_$(echo "${{ matrix.target }}" | tr '-' '_')="$NDKBIN/llvm-ar"
+          cargo build -p magpie-android --release --target "${{ matrix.target }}"
+
+      - name: Stage the shared object
+        run: |
+          mkdir -p out/lib/${{ matrix.abi }}
+          cp "target/${{ matrix.target }}/release/libmagpie.so" "out/lib/${{ matrix.abi }}/libmagpie.so"
+          "$ANDROID_HOME/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" --strip-unneeded "out/${{ matrix.abi }}/libmagpie.so" 2>/dev/null || true
+          ls -la "out/lib/${{ matrix.abi }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.abi }}
+          path: out/lib/${{ matrix.abi }}/libmagpie.so
+          if-no-files-found: error
+
+  apk:
+    name: package apk
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all ABIs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          path: native
+
+      - name: Assemble lib/ tree
+        run: |
+          mkdir -p android/build/lib
+          cp -r native/native-arm64-v8a android/build/lib/arm64-v8a
+          cp -r native/native-x86_64 android/build/lib/x86_64
+          find android/build/lib -name '*.so' -exec ls -la {} \;
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install packaging tools
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Build the APK from staged native libraries
+        env:
+          VERSION_NAME: ${{ github.ref_type == 'tag' && github.ref_name || '0.0.0-dev' }}
+          VERSION_CODE: ${{ github.run_number }}
+        run: |
+          chmod +x scripts/build-apk.sh
+          ./scripts/build-apk.sh --release --skip-rust \
+            --version-name "${VERSION_NAME#v}" \
+            --version-code "$VERSION_CODE"
+
+      - name: Sign with the release key when one is configured
+        id: sign
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          APK=android/app/build/outputs/apk/app-release.apk
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > /tmp/release.keystore
+            BUILD_TOOLS="$ANDROID_HOME/build-tools/36.0.0"
+            "$BUILD_TOOLS/apksigner" sign \
+              --ks /tmp/release.keystore --ks-pass "pass:$KEYSTORE_PASS" \
+              --ks-key-alias "$KEY_ALIAS" --key-pass "pass:$KEY_PASS" \
+              --out "$APK.signed" "$APK"
+            mv "$APK.signed" "$APK"
+            echo "signed=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "No signing secrets configured; shipping the debug-signed APK."
+            echo "signed=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Name the artefact
+        id: artefact
+        run: |
+          VERSION="${{ github.ref_type == 'tag' && github.ref_name || format('dev-{0}', github.run_number) }}"
+          OUT="magpie-rs-${VERSION}-universal.apk"
+          cp android/app/build/outputs/apk/app-release.apk "$OUT"
+          ls -la "$OUT"
+          echo "path=$OUT" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: ${{ steps.artefact.outputs.path }}
+          if-no-files-found: error
+
+      - name: Attach to the GitHub Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.artefact.outputs.path }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
